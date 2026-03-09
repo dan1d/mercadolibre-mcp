@@ -9,6 +9,10 @@
 
 MCP server that connects AI agents to [MercadoLibre](https://www.mercadolibre.com), the largest e-commerce marketplace in Latin America (150M+ users). Search products, get item details, browse categories, track trends, and convert currencies across Argentina, Brazil, Mexico, Chile, Colombia, and more.
 
+<a href="https://glama.ai/mcp/servers/dan1d/mercadolibre-mcp">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/dan1d/mercadolibre-mcp/badge" alt="mercadolibre-mcp MCP server" />
+</a>
+
 [npm](https://www.npmjs.com/package/@dan1d/mercadolibre-mcp) | [GitHub](https://github.com/dan1d/mercadolibre-mcp)
 
 ---
