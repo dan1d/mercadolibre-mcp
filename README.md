@@ -88,6 +88,10 @@ For endpoints that require auth (future premium features), add your access token
 
 ---
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/dan1d-mercadolibre-mcp).
+
 ## Available Tools
 
 | Tool | Description |
