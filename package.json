@@ -1,6 +1,6 @@
 {
   "name": "@dan1d/mercadolibre-mcp",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "MercadoLibre MCP server for AI agents. Search products, browse categories, track trends across Latin America.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,7 +22,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm test && npm run build"
   },
   "author": "dan1d",
   "license": "MIT",
@@ -38,6 +39,7 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@types/node": "^20.19.43",
     "@vitest/coverage-v8": "^1.6.1",
     "typescript": "^5.4.0",
     "vitest": "^1.6.1"

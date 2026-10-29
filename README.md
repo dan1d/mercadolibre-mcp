@@ -15,7 +15,7 @@ MCP server that connects AI agents to [MercadoLibre](https://www.mercadolibre.co
 
 ## Quick Start
 
-No API key required for public endpoints (search, items, categories, trends).
+**An access token is required.** MercadoLibre now gates almost every endpoint behind an app token (search, items, categories list, sellers, trends, currency conversion return 403/401 anonymously; only `get_category` works without one). Create a free application at [developers.mercadolibre.com](https://developers.mercadolibre.com) and use its access token as `MERCADOLIBRE_ACCESS_TOKEN` in every config below.
 
 ### Claude Desktop
 
@@ -26,7 +26,8 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "mercadolibre": {
       "command": "npx",
-      "args": ["-y", "@dan1d/mercadolibre-mcp"]
+      "args": ["-y", "@dan1d/mercadolibre-mcp"],
+      "env": { "MERCADOLIBRE_ACCESS_TOKEN": "APP_USR-..." }
     }
   }
 }
@@ -35,7 +36,7 @@ Add to your `claude_desktop_config.json`:
 ### Claude Code
 
 ```bash
-claude mcp add mercadolibre -- npx -y @dan1d/mercadolibre-mcp
+claude mcp add mercadolibre -e MERCADOLIBRE_ACCESS_TOKEN=APP_USR-... -- npx -y @dan1d/mercadolibre-mcp
 ```
 
 ### Cursor
@@ -47,7 +48,8 @@ Add to `.cursor/mcp.json`:
   "mcpServers": {
     "mercadolibre": {
       "command": "npx",
-      "args": ["-y", "@dan1d/mercadolibre-mcp"]
+      "args": ["-y", "@dan1d/mercadolibre-mcp"],
+      "env": { "MERCADOLIBRE_ACCESS_TOKEN": "APP_USR-..." }
     }
   }
 }
@@ -60,15 +62,16 @@ Add to `.cursor/mcp.json`:
   "mcpServers": {
     "mercadolibre": {
       "command": "npx",
-      "args": ["-y", "@dan1d/mercadolibre-mcp"]
+      "args": ["-y", "@dan1d/mercadolibre-mcp"],
+      "env": { "MERCADOLIBRE_ACCESS_TOKEN": "APP_USR-..." }
     }
   }
 }
 ```
 
-### With authentication (optional)
+### With authentication (required for all tools except `get_category`)
 
-For endpoints that require auth (future premium features), add your access token:
+Add your access token to the `env` block (the Claude Desktop / Cursor / Windsurf snippets above need the same `env`):
 
 ```json
 {

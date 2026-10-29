@@ -20,19 +20,20 @@ export class MercadoLibreClient {
   }
 
   async get<T = unknown>(path: string, params?: Record<string, string>): Promise<T> {
-    let url = `${BASE_URL}${path}`;
+    let fullPath = path;
     if (params) {
       const qs = new URLSearchParams(params).toString();
-      if (qs) url += `?${qs}`;
+      if (qs) fullPath += `?${qs}`;
     }
-    const res = await fetch(url, {
+    const res = await fetch(`${BASE_URL}${fullPath}`, {
       method: "GET",
       headers: this.headers(),
       signal: AbortSignal.timeout(30000),
     });
     if (!res.ok) {
       const body = await res.text();
-      throw new MercadoLibreError("GET", path, res.status, body);
+      // fullPath keeps the query string so a failing search is debuggable from the message alone.
+      throw new MercadoLibreError("GET", fullPath, res.status, body);
     }
     return res.json() as Promise<T>;
   }

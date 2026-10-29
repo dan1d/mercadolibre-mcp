@@ -49,6 +49,16 @@ export {
   getTrends,
   getCurrencyConversion,
 } from "./actions.js";
+export {
+  SearchItemsSchema,
+  GetItemSchema,
+  GetItemDescriptionSchema,
+  GetCategoriesSchema,
+  GetCategorySchema,
+  GetSellerInfoSchema,
+  GetTrendsSchema,
+  GetCurrencyConversionSchema,
+} from "./schemas.js";
 export type {
   SearchItemsParams,
   GetItemParams,

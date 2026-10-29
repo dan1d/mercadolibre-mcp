@@ -1,4 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createMcpServer, describeError, TOKEN_HINT } from "../src/mcp-server.js";
+import { MercadoLibreError } from "../src/errors.js";
+import pkg from "../package.json";
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -10,40 +15,61 @@ function jsonResponse(data: unknown, status = 200) {
   });
 }
 
-async function setupMcpClient() {
-  const { createMcpServer } = await import("../src/mcp-server.js");
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-
-  const server = createMcpServer();
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test-client", version: "1.0.0" });
-
-  await Promise.all([
-    server.connect(serverTransport),
-    client.connect(clientTransport),
-  ]);
-
-  return { client, server };
+function textOf(result: Awaited<ReturnType<Client["callTool"]>>): string {
+  return (result.content as Array<{ text: string }>)[0].text;
 }
 
+describe("describeError", () => {
+  it("adds the token hint on 401 and 403", () => {
+    for (const status of [401, 403]) {
+      const text = describeError(new MercadoLibreError("GET", "/sites/MLA/search?q=x", status, "forbidden"));
+      expect(text).toContain(`GET /sites/MLA/search?q=x failed (${status})`);
+      expect(text).toContain(TOKEN_HINT);
+    }
+  });
+
+  it("adds a back-off hint on 429", () => {
+    expect(describeError(new MercadoLibreError("GET", "/x", 429, "slow down"))).toContain("Rate limited");
+  });
+
+  it("passes other API errors and plain errors through", () => {
+    expect(describeError(new MercadoLibreError("GET", "/x", 500, "boom"))).toBe("GET /x failed (500): boom");
+    expect(describeError(new Error("plain"))).toBe("plain");
+    expect(describeError("string")).toBe("string");
+  });
+});
+
 describe("MCP Server", () => {
-  beforeEach(() => {
+  let client: Client;
+  let server: ReturnType<typeof createMcpServer>;
+
+  async function connect(token?: string) {
+    server = createMcpServer(token);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  }
+
+  beforeEach(async () => {
     mockFetch.mockReset();
+    await connect("TEST_TOKEN");
   });
 
-  it("creates server with correct name and version", async () => {
-    const { createMcpServer } = await import("../src/mcp-server.js");
-    const server = createMcpServer();
-    expect(server).toBeDefined();
+  afterEach(async () => {
+    await client.close();
+    await server.close();
   });
 
-  it("registers all 8 tools", async () => {
-    const { client } = await setupMcpClient();
-    const result = await client.listTools();
-    const names = result.tools.map((t) => t.name).sort();
+  it("reports the package.json version to clients", () => {
+    const info = client.getServerVersion();
+    expect(info?.name).toBe("mercadolibre-mcp");
+    expect(info?.version).toBe(pkg.version);
+    expect(info?.version).not.toBe("1.0.0");
+  });
 
-    expect(names).toEqual([
+  it("registers all 8 tools with descriptions and typed, bounded schemas", async () => {
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual([
       "get_categories",
       "get_category",
       "get_currency_conversion",
@@ -53,163 +79,90 @@ describe("MCP Server", () => {
       "get_trends",
       "search_items",
     ]);
+    for (const tool of tools) {
+      expect(tool.description?.length ?? 0).toBeGreaterThan(10);
+      expect(tool.inputSchema.type).toBe("object");
+    }
+    const search = tools.find((t) => t.name === "search_items")!;
+    const props = search.inputSchema.properties as Record<string, Record<string, unknown>>;
+    expect(props.limit).toMatchObject({ type: "integer", minimum: 1, maximum: 50 });
+    expect(props.query.description).toBeTruthy();
+  });
 
-    await client.close();
+  it("forwards the access token as a Bearer header", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ results: [] }));
+    await client.callTool({ name: "search_items", arguments: { query: "x" } });
+    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer TEST_TOKEN");
   });
 
   describe("tool calls — success", () => {
-    it("search_items returns results", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse({ results: [{ id: "MLA1" }] }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "search_items", arguments: { query: "iphone" } });
-      const text = (result.content as Array<{ text: string }>)[0].text;
-      expect(JSON.parse(text).results).toHaveLength(1);
-      await client.close();
+    it.each([
+      { name: "search_items", args: { query: "iphone" }, response: { results: [{ id: "MLA1" }] }, check: (t: string) => expect(JSON.parse(t).results).toHaveLength(1) },
+      { name: "get_item", args: { item_id: "MLA123" }, response: { id: "MLA123", title: "Test" }, check: (t: string) => expect(JSON.parse(t).id).toBe("MLA123") },
+      { name: "get_item_description", args: { item_id: "MLA123" }, response: { plain_text: "A product" }, check: (t: string) => expect(JSON.parse(t).plain_text).toBe("A product") },
+      { name: "get_categories", args: {}, response: [{ id: "MLA1055" }], check: (t: string) => expect(JSON.parse(t)).toHaveLength(1) },
+      { name: "get_category", args: { category_id: "MLA1055" }, response: { id: "MLA1055", name: "Electronics" }, check: (t: string) => expect(JSON.parse(t).name).toBe("Electronics") },
+      { name: "get_seller_info", args: { seller_id: 123 }, response: { id: 123, nickname: "SELLER" }, check: (t: string) => expect(JSON.parse(t).nickname).toBe("SELLER") },
+      { name: "get_trends", args: {}, response: [{ keyword: "iphone" }], check: (t: string) => expect(JSON.parse(t)[0].keyword).toBe("iphone") },
+      { name: "get_currency_conversion", args: { from: "USD", to: "ARS", amount: 100 }, response: { ratio: 1250.5 }, check: (t: string) => expect(JSON.parse(t).converted).toBe(125050) },
+    ])("$name $args", async ({ name, args, response, check }) => {
+      mockFetch.mockResolvedValueOnce(jsonResponse(response));
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError).toBeFalsy();
+      check(textOf(result));
     });
 
-    it("get_item returns item", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse({ id: "MLA123", title: "Test" }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_item", arguments: { item_id: "MLA123" } });
-      const text = (result.content as Array<{ text: string }>)[0].text;
-      expect(JSON.parse(text).id).toBe("MLA123");
-      await client.close();
-    });
-
-    it("get_item_description returns description", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse({ plain_text: "A product" }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_item_description", arguments: { item_id: "MLA123" } });
-      const text = (result.content as Array<{ text: string }>)[0].text;
-      expect(JSON.parse(text).plain_text).toBe("A product");
-      await client.close();
-    });
-
-    it("get_categories returns categories", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse([{ id: "MLA1055" }]));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_categories", arguments: {} });
-      const text = (result.content as Array<{ text: string }>)[0].text;
-      expect(JSON.parse(text)).toHaveLength(1);
-      await client.close();
-    });
-
-    it("get_category returns category details", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse({ id: "MLA1055", name: "Electronics" }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_category", arguments: { category_id: "MLA1055" } });
-      const text = (result.content as Array<{ text: string }>)[0].text;
-      expect(JSON.parse(text).name).toBe("Electronics");
-      await client.close();
-    });
-
-    it("get_seller_info returns seller", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse({ id: 123, nickname: "SELLER" }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_seller_info", arguments: { seller_id: 123 } });
-      const text = (result.content as Array<{ text: string }>)[0].text;
-      expect(JSON.parse(text).nickname).toBe("SELLER");
-      await client.close();
-    });
-
-    it("get_trends returns trends", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse([{ keyword: "iphone" }]));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_trends", arguments: {} });
-      const text = (result.content as Array<{ text: string }>)[0].text;
-      expect(JSON.parse(text)[0].keyword).toBe("iphone");
-      await client.close();
-    });
-
-    it("get_currency_conversion returns conversion", async () => {
-      mockFetch.mockResolvedValueOnce(jsonResponse({ ratio: 1250.5 }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_currency_conversion", arguments: { from: "USD", to: "ARS", amount: 100 } });
-      const text = (result.content as Array<{ text: string }>)[0].text;
-      expect(JSON.parse(text).converted).toBe(125050);
-      await client.close();
+    it("search_items sends the price range as price=MIN-MAX", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ results: [] }));
+      await client.callTool({ name: "search_items", arguments: { query: "tv", price_min: 100000, price_max: 500000 } });
+      expect(new URL(mockFetch.mock.calls[0][0] as string).searchParams.get("price")).toBe("100000-500000");
     });
   });
 
-  describe("tool calls — errors", () => {
-    it("search_items returns error on API failure", async () => {
-      mockFetch.mockResolvedValueOnce(new Response("Server Error", { status: 500 }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "search_items", arguments: { query: "test" } });
+  describe("tool calls — errors are returned as isError, never thrown", () => {
+    it.each([
+      { name: "search_items", args: { query: "test" } },
+      { name: "get_item", args: { item_id: "INVALID" } },
+      { name: "get_item_description", args: { item_id: "INVALID" } },
+      { name: "get_categories", args: {} },
+      { name: "get_category", args: { category_id: "INVALID" } },
+      { name: "get_seller_info", args: { seller_id: 999 } },
+      { name: "get_trends", args: {} },
+      { name: "get_currency_conversion", args: { from: "USD", to: "ARS" } },
+    ])("$name on HTTP 500", async ({ name, args }) => {
+      mockFetch.mockImplementation(async () => new Response("Server Error", { status: 500 }));
+      const result = await client.callTool({ name, arguments: args });
       expect(result.isError).toBe(true);
-      await client.close();
+      expect(textOf(result)).toContain("failed (500)");
     });
 
-    it("get_item returns error on 404", async () => {
-      mockFetch.mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_item", arguments: { item_id: "INVALID" } });
-      expect(result.isError).toBe(true);
+    it("403 without a token tells the agent exactly what to set", async () => {
       await client.close();
+      await server.close();
+      await connect(undefined);
+      mockFetch.mockResolvedValueOnce(new Response('{"message":"forbidden"}', { status: 403 }));
+      const result = await client.callTool({ name: "search_items", arguments: { query: "iphone" } });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("GET /sites/MLA/search?q=iphone&limit=10 failed (403)");
+      expect(textOf(result)).toContain("MERCADOLIBRE_ACCESS_TOKEN");
+      expect(mockFetch.mock.calls[0][1].headers.Authorization).toBeUndefined();
     });
 
-    it("get_item_description returns error on failure", async () => {
-      mockFetch.mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_item_description", arguments: { item_id: "INVALID" } });
-      expect(result.isError).toBe(true);
-      await client.close();
-    });
-
-    it("get_categories returns error on failure", async () => {
-      mockFetch.mockResolvedValueOnce(new Response("Error", { status: 500 }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_categories", arguments: {} });
-      expect(result.isError).toBe(true);
-      await client.close();
-    });
-
-    it("get_category returns error on failure", async () => {
-      mockFetch.mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_category", arguments: { category_id: "INVALID" } });
-      expect(result.isError).toBe(true);
-      await client.close();
-    });
-
-    it("get_seller_info returns error on failure", async () => {
-      mockFetch.mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_seller_info", arguments: { seller_id: 999 } });
-      expect(result.isError).toBe(true);
-      await client.close();
-    });
-
-    it("get_trends returns error on failure", async () => {
-      mockFetch.mockResolvedValueOnce(new Response("Error", { status: 500 }));
-      const { client } = await setupMcpClient();
-
+    it("network failure (fetch rejects) is reported with isError", async () => {
+      mockFetch.mockRejectedValueOnce(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
       const result = await client.callTool({ name: "get_trends", arguments: {} });
       expect(result.isError).toBe(true);
-      await client.close();
+      expect(textOf(result)).toContain("timeout");
     });
 
-    it("get_currency_conversion returns error on failure", async () => {
-      mockFetch.mockResolvedValueOnce(new Response("Error", { status: 500 }));
-      const { client } = await setupMcpClient();
-
-      const result = await client.callTool({ name: "get_currency_conversion", arguments: { from: "USD", to: "ARS" } });
-      expect(result.isError).toBe(true);
-      await client.close();
+    it("rejects out-of-range limit at the schema boundary without calling the API", async () => {
+      const outcome = await client.callTool({ name: "search_items", arguments: { query: "tv", limit: 0 } }).then(
+        (r) => ({ isError: r.isError, text: textOf(r) }),
+        (e: Error) => ({ isError: true, text: e.message }),
+      );
+      expect(outcome.isError).toBe(true);
+      expect(outcome.text).toMatch(/limit|Invalid|greater/i);
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 });

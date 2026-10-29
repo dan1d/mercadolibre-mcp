@@ -6,7 +6,7 @@ startCommand:
       mercadolibreAccessToken:
         type: string
         title: MercadoLibre Access Token
-        description: Optional access token for authenticated endpoints. Public endpoints (search, items, categories, trends) work without auth.
+        description: MercadoLibre access token. Required for every tool except get_category (MercadoLibre returns 403/401 anonymously). Create a free app at https://developers.mercadolibre.com.
   commandFunction:
     |-
     (config) => ({

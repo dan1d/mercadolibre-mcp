@@ -14,11 +14,17 @@ import {
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
+const BASE = "https://api.mercadolibre.com";
+
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function calledUrl(n = 0): string {
+  return mockFetch.mock.calls[n][0] as string;
 }
 
 describe("actions", () => {
@@ -30,113 +36,98 @@ describe("actions", () => {
   });
 
   describe("searchItems", () => {
-    it("searches with query and default site MLA", async () => {
+    it("searches with query, default site MLA and default limit 10", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse({ results: [{ id: "MLA1" }] }));
-
       const result = await searchItems(client, { query: "iphone" });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("/sites/MLA/search?"),
-        expect.any(Object)
-      );
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("q=iphone");
-      expect(url).toContain("limit=10");
+      expect(calledUrl()).toBe(`${BASE}/sites/MLA/search?q=iphone&limit=10`);
       expect(result).toEqual({ results: [{ id: "MLA1" }] });
     });
 
-    it("uses custom site_id", async () => {
+    it("uses a custom site_id and offset", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse({ results: [] }));
-
-      await searchItems(client, { query: "notebook", site_id: "MLB" });
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/sites/MLB/search");
+      await searchItems(client, { query: "notebook", site_id: "MLB", offset: 20 });
+      expect(calledUrl()).toBe(`${BASE}/sites/MLB/search?q=notebook&limit=10&offset=20`);
     });
 
-    it("includes category and price filters", async () => {
+    it("sends the price range as MercadoLibre's single price=MIN-MAX filter", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse({ results: [] }));
-
-      await searchItems(client, {
-        query: "tv",
-        category: "MLA1055",
-        price_min: 100000,
-        price_max: 500000,
-      });
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("category=MLA1055");
-      expect(url).toContain("price_min=100000");
-      expect(url).toContain("price_max=500000");
+      await searchItems(client, { query: "tv", category: "MLA1055", price_min: 100000, price_max: 500000 });
+      expect(calledUrl()).toBe(`${BASE}/sites/MLA/search?q=tv&category=MLA1055&price=100000-500000&limit=10`);
     });
 
-    it("caps limit at 50", async () => {
+    it.each([
+      [{ price_max: 500000 }, "*-500000"],
+      [{ price_min: 100000 }, "100000-*"],
+    ])("leaves an open side as * for %j", async (range, expected) => {
       mockFetch.mockResolvedValueOnce(jsonResponse({ results: [] }));
+      await searchItems(client, { query: "tv", ...range });
+      expect(calledUrl()).toContain(`price=${encodeURIComponent(expected).replace("%2A", "*")}`.replace("*", "*"));
+      expect(new URL(calledUrl()).searchParams.get("price")).toBe(expected);
+    });
 
+    it("omits the price filter when no bound is given", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ results: [] }));
+      await searchItems(client, { query: "tv" });
+      expect(new URL(calledUrl()).searchParams.has("price")).toBe(false);
+    });
+
+    it("caps limit at 50 for programmatic callers that bypass the schema", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ results: [] }));
       await searchItems(client, { query: "test", limit: 200 });
+      expect(new URL(calledUrl()).searchParams.get("limit")).toBe("50");
+    });
 
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("limit=50");
+    it("URL-encodes the query and site", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ results: [] }));
+      await searchItems(client, { query: "a&b c", site_id: "ML/X" });
+      expect(calledUrl()).toBe(`${BASE}/sites/ML%2FX/search?q=a%26b+c&limit=10`);
     });
   });
 
-  describe("getItem", () => {
-    it("fetches item by ID", async () => {
+  describe("getItem / getItemDescription", () => {
+    it("fetches item by exact path", async () => {
       const item = { id: "MLA123", title: "Test Item", price: 50000 };
       mockFetch.mockResolvedValueOnce(jsonResponse(item));
-
       const result = await getItem(client, { item_id: "MLA123" });
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/items/MLA123");
+      expect(calledUrl()).toBe(`${BASE}/items/MLA123`);
       expect(result).toEqual(item);
     });
-  });
 
-  describe("getItemDescription", () => {
-    it("fetches item description", async () => {
+    it("fetches item description by exact path", async () => {
       const desc = { plain_text: "A great product" };
       mockFetch.mockResolvedValueOnce(jsonResponse(desc));
-
       const result = await getItemDescription(client, { item_id: "MLA123" });
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/items/MLA123/description");
+      expect(calledUrl()).toBe(`${BASE}/items/MLA123/description`);
       expect(result).toEqual(desc);
+    });
+
+    it("URL-encodes the item id", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({}));
+      await getItem(client, { item_id: "../users/me" });
+      expect(calledUrl()).toBe(`${BASE}/items/..%2Fusers%2Fme`);
     });
   });
 
-  describe("getCategories", () => {
-    it("lists categories for default site MLA", async () => {
+  describe("getCategories / getCategory", () => {
+    it("lists categories for the default site", async () => {
       const cats = [{ id: "MLA1055", name: "Electrónica" }];
       mockFetch.mockResolvedValueOnce(jsonResponse(cats));
-
       const result = await getCategories(client);
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/sites/MLA/categories");
+      expect(calledUrl()).toBe(`${BASE}/sites/MLA/categories`);
       expect(result).toEqual(cats);
     });
 
-    it("lists categories for custom site", async () => {
+    it("lists categories for a custom site", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse([]));
-
       await getCategories(client, { site_id: "MLM" });
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/sites/MLM/categories");
+      expect(calledUrl()).toBe(`${BASE}/sites/MLM/categories`);
     });
-  });
 
-  describe("getCategory", () => {
     it("fetches category details", async () => {
       const cat = { id: "MLA1055", name: "Electrónica", path_from_root: [] };
       mockFetch.mockResolvedValueOnce(jsonResponse(cat));
-
       const result = await getCategory(client, { category_id: "MLA1055" });
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/categories/MLA1055");
+      expect(calledUrl()).toBe(`${BASE}/categories/MLA1055`);
       expect(result).toEqual(cat);
     });
   });
@@ -145,66 +136,51 @@ describe("actions", () => {
     it("fetches seller profile", async () => {
       const seller = { id: 12345, nickname: "SELLER_TEST", reputation: {} };
       mockFetch.mockResolvedValueOnce(jsonResponse(seller));
-
       const result = await getSellerInfo(client, { seller_id: 12345 });
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/users/12345");
+      expect(calledUrl()).toBe(`${BASE}/users/12345`);
       expect(result).toEqual(seller);
     });
   });
 
   describe("getTrends", () => {
-    it("fetches trends for default site", async () => {
+    it("fetches trends for the default site", async () => {
       const trends = [{ keyword: "iphone 15" }, { keyword: "ps5" }];
       mockFetch.mockResolvedValueOnce(jsonResponse(trends));
-
       const result = await getTrends(client);
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/trends/MLA");
+      expect(calledUrl()).toBe(`${BASE}/trends/MLA`);
       expect(result).toEqual(trends);
     });
 
-    it("fetches trends for custom site", async () => {
+    it("fetches trends for a custom site", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse([]));
-
       await getTrends(client, { site_id: "MLB" });
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/trends/MLB");
+      expect(calledUrl()).toBe(`${BASE}/trends/MLB`);
     });
   });
 
   describe("getCurrencyConversion", () => {
-    it("converts with rate and computes amount", async () => {
+    it("converts with the returned ratio", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse({ ratio: 1250.5 }));
-
-      const result = await getCurrencyConversion(client, {
-        from: "USD",
-        to: "ARS",
-        amount: 100,
-      }) as { converted: number; rate: number; from: string; to: string; amount: number };
-
-      const url = mockFetch.mock.calls[0][0] as string;
-      expect(url).toContain("/currency_conversions/search");
-      expect(url).toContain("from=USD");
-      expect(url).toContain("to=ARS");
-      expect(result.rate).toBe(1250.5);
-      expect(result.converted).toBe(125050);
-      expect(result.amount).toBe(100);
+      const result = await getCurrencyConversion(client, { from: "USD", to: "ARS", amount: 100 });
+      expect(calledUrl()).toBe(`${BASE}/currency_conversions/search?from=USD&to=ARS`);
+      expect(result).toEqual({ from: "USD", to: "ARS", rate: 1250.5, amount: 100, converted: 125050 });
     });
 
     it("defaults amount to 1", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse({ ratio: 1250.5 }));
-
-      const result = await getCurrencyConversion(client, {
-        from: "USD",
-        to: "ARS",
-      }) as { amount: number; converted: number };
-
+      const result = await getCurrencyConversion(client, { from: "USD", to: "ARS" }) as { amount: number; converted: number };
       expect(result.amount).toBe(1);
       expect(result.converted).toBe(1250.5);
     });
+
+    it.each([{}, { ratio: null }, { ratio: 0 }, { ratio: "1250" }])(
+      "throws instead of returning NaN/null when the response is %j",
+      async (body) => {
+        mockFetch.mockResolvedValueOnce(jsonResponse(body));
+        await expect(getCurrencyConversion(client, { from: "USD", to: "ARS", amount: 100 })).rejects.toThrow(
+          /no usable rate for USD->ARS/
+        );
+      }
+    );
   });
 });
